@@ -452,18 +452,18 @@ def api_explain():
     direcao = fonte_principal.get("wave_direction_deg")
 
     # 🔹 Calcula energia (altura x período)
-    if altura and periodo:
-        energia = altura * periodo
-        merged_now["energy"] = round(energia, 1)
-        merged_now["energy_level"] = (
-            "Baixa" if energia <= 5 else
-            "Média" if energia <= 12 else
-            "Alta"
-        )
+    if fonte_principal.get("wave_height_m") and fonte_principal.get("wave_period_s"):
+    energia = fonte_principal["wave_height_m"] * fonte_principal["wave_period_s"]
+    merged_now["energy"] = round(energia, 1)
+    merged_now["energy_level"] = (
+        "Baixa" if energia <= 5 else
+        "Média" if energia <= 12 else
+        "Alta"
+    )
     else:
-        merged_now["energy"] = None
-        merged_now["energy_level"] = None
-
+    merged_now["energy"] = None
+    merged_now["energy_level"] = None
+    
     # 🔹 Garante que a direção do swell nunca venha vazia
     if direcao:
         merged_now["wave_direction_deg"] = direcao
