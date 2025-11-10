@@ -516,6 +516,46 @@ def api_explain():
         "forecast_day": merged_day,         # resumo do dia -> IA
         "explanation_pt": explanation_pt,
     })
+# --- Mantém a instância acordada (ping leve) ---
+@app.get("/health")
+def health():
+    # nada externo; só indica que o serviço está de pé
+    return {"ok": True, "service": "ExplicaSurf Backend"}
+
+# --- Pré-aquecimento de cache (opcional) ---
+@app.get("/warmup")
+def warmup():
+    """
+    Chama fontes baratas (Open-Meteo + vento + maré) para encher o cache.
+    NÃO chama OpenWeather por padrão para não gastar cota.
+    Use este endpoint só quando quiser “esquentar” o backend.
+    """
+    t0 = time.time()
+
+    # 1) Previsão marinha e vento (Open-Meteo) -> já tem cache TTL
+    om = fetch_open_meteo(LAT, LON)
+    wind = fetch_open_meteo_wind(LAT, LON)
+
+    # 2) Constrói a série (apenas processamento local)
+    series_len = 0
+    if om:
+        fseries = build_forecast_series(om, wind)
+        series_len = len(fseries)
+
+    # 3) Maré (sua função local)
+    tide = get_tide_adjusted(0)
+
+    took_ms = round((time.time() - t0) * 1000)
+    return {
+        "ok": True,
+        "cached": {
+            "open_meteo": bool(om),
+            "open_meteo_wind": bool(wind),
+            "forecast_series_len": series_len,
+            "tide": bool(tide),
+        },
+        "took_ms": took_ms,
+    }
 if __name__ == "__main__":
      app.run(host="0.0.0.0", port=8000, debug=True)
 
