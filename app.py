@@ -127,68 +127,38 @@ def wind_trend_summary(series: List[Dict[str, Any]]) -> str:
 
 def fetch_open_meteo(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     """
-    🔥 Novo fetch que une:
-    - Ondas
-    - Vento (mar)
-    - Precipitação
-    - Chance de chuva
-    - Nuvens
-    - Temperatura
+    🔁 usa a Marine API para dados de ONDAS.
     """
-    key = f"openmeteo_forecast:{lat:.4f},{lon:.4f}"
+    key = f"openmeteo_marine:{lat:.4f},{lon:.4f}"
     cached = cache.get(key)
     if cached:
         return cached
 
-    url = "https://api.open-meteo.com/v1/forecast"
-
+    url = "https://marine-api.open-meteo.com/v1/marine"
     params = {
         "latitude": lat,
         "longitude": lon,
-
-        # ✅ TUDO EM 1 SÓ CHAMADA
-        "hourly": ",".join([
-            # ondas
-            "wave_height",
-            "wave_period",
-            "wave_direction",
-            "wind_wave_height",
-            "wind_wave_period",
-            "wind_wave_direction",
-
-            # clima
-            "precipitation",
-            "precipitation_probability",
-            "cloudcover",
-            "temperature_2m",
-        ]),
-
+        "hourly": "wave_height,wave_period,wave_direction",
         "length_unit": "metric",
-        "windspeed_unit": "kmh",
         "timezone": "auto",
     }
-
     try:
         r = httpx.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         cache.set(key, data)
         return data
-
     except Exception as e:
-        print("DEBUG Open-Meteo Forecast error:", e)
+        print("DEBUG Open-Meteo Marine error:", e)
         return None
 
 
 def fetch_open_meteo_wind(lat: float, lon: float) -> Optional[Dict[str, Any]]:
-    """Mantido para compatibilidade — vento 10m"""
     key = f"openmeteo_wind:{lat:.4f},{lon:.4f}"
     cached = cache.get(key)
     if cached:
         return cached
-
     url = "https://api.open-meteo.com/v1/forecast"
-
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -196,61 +166,41 @@ def fetch_open_meteo_wind(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         "windspeed_unit": "kmh",
         "timezone": "auto",
     }
-
     try:
         r = httpx.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         cache.set(key, data)
         return data
-
     except Exception as e:
         print("DEBUG Open-Meteo Wind error:", e)
         return None
 
 
-
-def pick_open_meteo_point(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Escolhe o ponto atual mais próximo do horário"""
-    try:
-        times_iso = data["hourly"]["time"]
-        times = parse_iso_list(times_iso)
-        idx = nearest_index(times)
-
-        return {
-            "time": times_iso[idx],
-            "wave_height_m": data["hourly"]["wave_height"][idx],
-            "wave_period_s": data["hourly"]["wave_period"][idx],
-            "wave_direction_deg": data["hourly"]["wave_direction"][idx],
-        }
-
-    except Exception:
-        return None
-
-def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
-    """Clima atual (vento + condições locais)"""
-    if not OPENWEATHER_API_KEY:
-        print("DEBUG OpenWeather: nenhuma API_KEY configurada")
-        return None
-
-    key = f"openweather:{lat:.4f},{lon:.4f}"
+def fetch_weather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    """
+    🌦️ Clima geral (precipitação, probabilidade, nuvens, temperatura).
+    """
+    key = f"openmeteo_weather:{lat:.4f},{lon:.4f}"
     cached = cache.get(key)
     if cached:
         return cached
 
-    url = "https://api.openweathermap.org/data/2.5/weather"
-
-    params = {"lat": lat, "lon": lon, "appid": OPENWEATHER_API_KEY, "units": "metric"}
-
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation,precipitation_probability,cloudcover,temperature_2m",
+        "timezone": "auto",
+    }
     try:
-        r = httpx.get(url, params=params, timeout=10)
+        r = httpx.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         cache.set(key, data)
         return data
-
     except Exception as e:
-        print("DEBUG OpenWeather error:", e)
+        print("DEBUG Open-Meteo Weather error:", e)
         return None
 
 
@@ -272,13 +222,19 @@ def pick_openweather_now(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 # ============== Forecast builder ==============
-def build_forecast_series(om_raw, wind_raw=None):
+def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
+    """
+    Une: ondas (marine), vento 10m e clima (precipitação, nuvens, temperatura).
+    """
     try:
-        h = om_raw.get("hourly", {})
+        h = om_raw.get("hourly", {}) if om_raw else {}
         times = h.get("time", [])
+
         heights = h.get("wave_height", [])
         periods = h.get("wave_period", [])
         dirs = h.get("wave_direction", [])
+
+        # vento
         wind_map = {}
         if wind_raw:
             hw = wind_raw.get("hourly", {})
@@ -287,10 +243,15 @@ def build_forecast_series(om_raw, wind_raw=None):
             wdg = hw.get("wind_direction_10m", [])
             for i in range(min(len(wt), len(wsp), len(wdg))):
                 wind_map[wt[i]] = (wsp[i], wdg[i])
-        precip = h.get("precipitation", [])
-        precip_prob = h.get("precipitation_probability", [])
-        clouds = h.get("cloudcover", [])
-        temps = h.get("temperature_2m", [])
+
+        # clima
+        precip = precip_prob = clouds = temps = []
+        if weather_raw:
+            hwx = weather_raw.get("hourly", {})
+            precip = hwx.get("precipitation", [])
+            precip_prob = hwx.get("precipitation_probability", [])
+            clouds = hwx.get("cloudcover", [])
+            temps = hwx.get("temperature_2m", [])
 
         series = []
         for i, t in enumerate(times):
@@ -298,7 +259,11 @@ def build_forecast_series(om_raw, wind_raw=None):
             altura = heights[i] if i < len(heights) else None
             periodo = periods[i] if i < len(periods) else None
             energia = altura * periodo if altura and periodo else None
-            energia_level = "Baixa" if energia and energia <= 5 else "Média" if energia and energia <= 12 else "Alta" if energia else None
+            energia_level = (
+                "Baixa" if energia and energia <= 5 else
+                "Média" if energia and energia <= 12 else
+                "Alta" if energia else None
+            )
             series.append({
                 "time": t,
                 "wave_height_m": altura,
@@ -312,7 +277,7 @@ def build_forecast_series(om_raw, wind_raw=None):
                 "precip_probability": precip_prob[i] if i < len(precip_prob) else 0,
                 "clouds": clouds[i] if i < len(clouds) else 0,
                 "temp_c": temps[i] if i < len(temps) else None,
-})
+            })
         return series
     except Exception as e:
         print("DEBUG build_forecast_series error:", e)
@@ -445,33 +410,35 @@ def api_explain():
     level = (request.args.get("level") or "iniciante").lower()
     ai_mode = (request.args.get("ai") or "off").lower()
     day_offset = int(request.args.get("day", 0))
-    # depois de ler day_offset:
     day_label = "hoje" if day_offset == 0 else "amanhã" if day_offset == 1 else "depois de amanhã"
 
+    # Perfil do surfista
+    name = request.args.get("name", "Surfista")
+    stance = request.args.get("stance", "").lower()
+    experience_months = int(request.args.get("experience_months", 0))
 
-    # 🧩 Novos dados do perfil do surfista (vindos da URL)
-    name = request.args.get("name", "Surfista")  # nome do surfista
-    stance = request.args.get("stance", "").lower()  # goofy ou regular
-    experience_months = int(request.args.get("experience_months", 0))  # experiência em meses
+    om_raw = fetch_open_meteo(LAT, LON)        # ondas
+    wind_raw = fetch_open_meteo_wind(LAT, LON) # vento
+    weather_raw = fetch_weather(LAT, LON)      # clima
 
-    # 🔹 Dados brutos
-    om_raw = fetch_open_meteo(LAT, LON)
-    wind_raw = fetch_open_meteo_wind(LAT, LON)
-    forecast_series = build_forecast_series(om_raw, wind_raw) if om_raw else []
+    forecast_series = (
+        build_forecast_series(om_raw, wind_raw, weather_raw)
+        if om_raw and wind_raw and weather_raw else []
+    )
+    # -------------------------------------
 
-    # 🔹 Ponto atual (para o cartão de condições)
+    # ponto atual
     om_point = pick_open_meteo_point(om_raw) if om_raw else None
     ow_raw = fetch_openweather(LAT, LON)
     ow_now = pick_openweather_now(ow_raw) if ow_raw else None
     merged_now = {**(om_point or {}), **(ow_now or {})}
 
-    # aliases compatíveis com seu OceanDataCard
     if "wave_direction_deg" in merged_now and "wave_dir_deg" not in merged_now:
         merged_now["wave_dir_deg"] = merged_now["wave_direction_deg"]
     if "wind_direction_deg" in merged_now and "wind_dir_deg" not in merged_now:
         merged_now["wind_dir_deg"] = merged_now["wind_direction_deg"]
 
-    # 🔹 Dia selecionado (para gráficos e IA)
+    # média do dia selecionado
     selected_point = None
     if forecast_series:
         today = datetime.datetime.now().date()
@@ -493,7 +460,7 @@ def api_explain():
                 "wind_direction_deg": avg_dir,
             }
 
-    # 🔹 Maré e tendências
+    # maré
     tide_raw = get_tide_adjusted(day_offset)
     tide_processed = {
         "extremes": tide_raw.get("extremes"),
@@ -504,7 +471,6 @@ def api_explain():
     tide_peak_text = format_next_tide_peak(tide_processed.get("next_extreme"))
     wind_trend = wind_trend_summary(forecast_series)
 
-        # 🔹 Se o ponto atual estiver incompleto, usa o ponto médio do dia
     fonte_principal = merged_now
     if not merged_now.get("wave_height_m") or not merged_now.get("wave_period_s"):
         fonte_principal = selected_point or merged_now
@@ -513,32 +479,27 @@ def api_explain():
     periodo = fonte_principal.get("wave_period_s")
     direcao = fonte_principal.get("wave_direction_deg")
 
-    # 🔹 Calcula energia (altura x período)
     if fonte_principal.get("wave_height_m") and fonte_principal.get("wave_period_s"):
         energia = fonte_principal["wave_height_m"] * fonte_principal["wave_period_s"]
         merged_now["energy"] = round(energia, 1)
         merged_now["energy_level"] = (
-        "Baixa" if energia <= 5 else
-        "Média" if energia <= 12 else
-        "Alta"
-    )
+            "Baixa" if energia <= 5 else
+            "Média" if energia <= 12 else
+            "Alta"
+        )
     else:
         merged_now["energy"] = None
         merged_now["energy_level"] = None
-    
-    # 🔹 Garante que a direção do swell nunca venha vazia
+
     if direcao:
         merged_now["wave_direction_deg"] = direcao
         merged_now["wave_dir_deg"] = direcao
 
-    # 🔹 Mantém a parte da maré normalmente
     merged_now["tide"] = {
         "now": tide_processed.get("now", {}),
         "next_extreme": tide_processed.get("next_extreme", {}),
     }
 
-
-    # 🔹 Percepção e pacote do dia (para IA)
     perceived = classify_perceived_size(
         (selected_point or merged_now).get("wave_height_m"),
         (selected_point or merged_now).get("wave_period_s")
@@ -551,14 +512,13 @@ def api_explain():
         "wind_trend_text": wind_trend,
         "perceived": perceived,
     }
-    # 🧾 DEBUG — mostra o perfil recebido do frontend
+
     print("=== DEBUG PERFIL RECEBIDO ===")
     print("Nome:", name)
     print("Base (stance):", stance)
     print("Experiência (meses):", experience_months)
     print("=============================")
 
-    # 🧠 IA (Gemini) agora usa nome, base e experiência do surfista
     explanation_pt = ""
     if ai_mode == "on" and GEMINI_API_KEY:
         explanation_pt = explain_with_gemini(
@@ -567,44 +527,38 @@ def api_explain():
             name=name,
             stance=stance,
             experience_months=experience_months,
-            day_label=day_label   
+            day_label=day_label
         )
+
     return jsonify({
         "spot": "Stella Maris, Salvador-BA",
         "level": level,
         "day": day_offset,
-        "forecast_now": merged_now,         # agora -> OceanDataCard
-        "forecast_series": forecast_series, # séries -> gráficos
-        "forecast_day": merged_day,         # resumo do dia -> IA
+        "forecast_now": merged_now,
+        "forecast_series": forecast_series,
+        "forecast_day": merged_day,
         "explanation_pt": explanation_pt,
     })
-# --- Mantém a instância acordada (ping leve) ---
+
+# --- health ---
 @app.get("/health")
 def health():
-    # nada externo; só indica que o serviço está de pé
     return {"ok": True, "service": "ExplicaSurf Backend"}
 
-# --- Pré-aquecimento de cache (opcional) ---
+# --- warmup ---
 @app.get("/warmup")
 def warmup():
-    """
-    Chama fontes baratas (Open-Meteo + vento + maré) para encher o cache.
-    NÃO chama OpenWeather por padrão para não gastar cota.
-    Use este endpoint só quando quiser “esquentar” o backend.
-    """
     t0 = time.time()
 
-    # 1) Previsão marinha e vento (Open-Meteo) -> já tem cache TTL
     om = fetch_open_meteo(LAT, LON)
     wind = fetch_open_meteo_wind(LAT, LON)
+    weather = fetch_weather(LAT, LON)
 
-    # 2) Constrói a série (apenas processamento local)
     series_len = 0
-    if om:
-        fseries = build_forecast_series(om, wind)
+    if om and wind and weather:
+        fseries = build_forecast_series(om, wind, weather)
         series_len = len(fseries)
 
-    # 3) Maré (sua função local)
     tide = get_tide_adjusted(0)
 
     took_ms = round((time.time() - t0) * 1000)
@@ -613,11 +567,13 @@ def warmup():
         "cached": {
             "open_meteo": bool(om),
             "open_meteo_wind": bool(wind),
+            "weather": bool(weather),
             "forecast_series_len": series_len,
             "tide": bool(tide),
         },
         "took_ms": took_ms,
     }
+
 if __name__ == "__main__":
      app.run(host="0.0.0.0", port=8000, debug=True)
 
