@@ -124,35 +124,71 @@ def wind_trend_summary(series: List[Dict[str, Any]]) -> str:
     return "Vento nas próximas horas: " + ", ".join(partes) + "." if partes else ""
 
 # ============== APIs externas ==============
+
 def fetch_open_meteo(lat: float, lon: float) -> Optional[Dict[str, Any]]:
-    key = f"openmeteo_marine:{lat:.4f},{lon:.4f}"
+    """
+    🔥 Novo fetch que une:
+    - Ondas
+    - Vento (mar)
+    - Precipitação
+    - Chance de chuva
+    - Nuvens
+    - Temperatura
+    """
+    key = f"openmeteo_forecast:{lat:.4f},{lon:.4f}"
     cached = cache.get(key)
     if cached:
         return cached
-    url = "https://marine-api.open-meteo.com/v1/marine"
+
+    url = "https://api.open-meteo.com/v1/forecast"
+
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "wave_height,wave_period,wave_direction,wind_wave_height,wind_wave_period,wind_wave_direction",
+
+        # ✅ TUDO EM 1 SÓ CHAMADA
+        "hourly": ",".join([
+            # ondas
+            "wave_height",
+            "wave_period",
+            "wave_direction",
+            "wind_wave_height",
+            "wind_wave_period",
+            "wind_wave_direction",
+
+            # clima
+            "precipitation",
+            "precipitation_probability",
+            "cloudcover",
+            "temperature_2m",
+        ]),
+
         "length_unit": "metric",
+        "windspeed_unit": "kmh",
         "timezone": "auto",
     }
+
     try:
         r = httpx.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         cache.set(key, data)
         return data
+
     except Exception as e:
-        print("DEBUG Open-Meteo Marine error:", e)
+        print("DEBUG Open-Meteo Forecast error:", e)
         return None
 
+
 def fetch_open_meteo_wind(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    """Mantido para compatibilidade — vento 10m"""
     key = f"openmeteo_wind:{lat:.4f},{lon:.4f}"
     cached = cache.get(key)
     if cached:
         return cached
+
     url = "https://api.open-meteo.com/v1/forecast"
+
     params = {
         "latitude": lat,
         "longitude": lon,
@@ -160,62 +196,80 @@ def fetch_open_meteo_wind(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         "windspeed_unit": "kmh",
         "timezone": "auto",
     }
+
     try:
         r = httpx.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         cache.set(key, data)
         return data
+
     except Exception as e:
         print("DEBUG Open-Meteo Wind error:", e)
         return None
 
+
+
 def pick_open_meteo_point(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Escolhe o ponto atual mais próximo do horário"""
     try:
         times_iso = data["hourly"]["time"]
         times = parse_iso_list(times_iso)
         idx = nearest_index(times)
+
         return {
             "time": times_iso[idx],
             "wave_height_m": data["hourly"]["wave_height"][idx],
             "wave_period_s": data["hourly"]["wave_period"][idx],
             "wave_direction_deg": data["hourly"]["wave_direction"][idx],
         }
+
     except Exception:
         return None
 
 def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    """Clima atual (vento + condições locais)"""
     if not OPENWEATHER_API_KEY:
         print("DEBUG OpenWeather: nenhuma API_KEY configurada")
         return None
+
     key = f"openweather:{lat:.4f},{lon:.4f}"
     cached = cache.get(key)
     if cached:
         return cached
+
     url = "https://api.openweathermap.org/data/2.5/weather"
+
     params = {"lat": lat, "lon": lon, "appid": OPENWEATHER_API_KEY, "units": "metric"}
+
     try:
         r = httpx.get(url, params=params, timeout=10)
         r.raise_for_status()
         data = r.json()
         cache.set(key, data)
         return data
+
     except Exception as e:
         print("DEBUG OpenWeather error:", e)
         return None
 
+
 def pick_openweather_now(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Transforma resposta do OpenWeather em formato simples"""
     try:
         wind_ms = data.get("wind", {}).get("speed")
         wind_deg = data.get("wind", {}).get("deg")
+
         return {
             "wind_speed_kmh": round(float(wind_ms) * 3.6, 1) if isinstance(wind_ms, (int, float)) else None,
             "wind_direction_deg": wind_deg,
             "source": "openweather",
         }
+
     except Exception as e:
         print("DEBUG pick_openweather_now error:", e)
         return None
+
 
 # ============== Forecast builder ==============
 def build_forecast_series(om_raw, wind_raw=None):
@@ -233,6 +287,10 @@ def build_forecast_series(om_raw, wind_raw=None):
             wdg = hw.get("wind_direction_10m", [])
             for i in range(min(len(wt), len(wsp), len(wdg))):
                 wind_map[wt[i]] = (wsp[i], wdg[i])
+        precip = h.get("precipitation", [])
+        precip_prob = h.get("precipitation_probability", [])
+        clouds = h.get("cloudcover", [])
+        temps = h.get("temperature_2m", [])
 
         series = []
         for i, t in enumerate(times):
@@ -250,7 +308,11 @@ def build_forecast_series(om_raw, wind_raw=None):
                 "wind_dir_deg": dir10,
                 "energy": round(energia, 1) if energia else None,
                 "energy_level": energia_level,
-            })
+                "precip_mm": precip[i] if i < len(precip) else 0,
+                "precip_probability": precip_prob[i] if i < len(precip_prob) else 0,
+                "clouds": clouds[i] if i < len(clouds) else 0,
+                "temp_c": temps[i] if i < len(temps) else None,
+})
         return series
     except Exception as e:
         print("DEBUG build_forecast_series error:", e)
