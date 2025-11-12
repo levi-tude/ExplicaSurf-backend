@@ -481,7 +481,7 @@ def api_explain():
         wind_raw = fetch_open_meteo_wind(LAT, LON)  # ok se vier None
         weather_raw = fetch_weather(LAT, LON)
         forecast_series = build_forecast_series(om_raw, wind_raw, weather_raw)
-         if om_raw else []
+        if om_raw else []
 
         # ponto atual (ondas) + vento atual (openweather)
         om_point = pick_open_meteo_point(om_raw) or {}
