@@ -214,15 +214,18 @@ def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     if cached:
         return cached
 
-    url = "https://api.openweathermap.org/data/2.5/weather"
+    # 🔹 Usa o endpoint "forecast" (retorna lista com dados de várias horas)
+    url = "https://api.openweathermap.org/data/2.5/forecast"
     params = {
         "lat": lat,
         "lon": lon,
         "appid": OPENWEATHER_API_KEY,
-        "units": "metric"
+        "units": "metric",
+        "lang": "pt_br",
     }
+
     try:
-        r = httpx.get(url, params=params, timeout=10)
+        r = httpx.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
         cache.set(key, data)
@@ -232,22 +235,34 @@ def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         return None
 
 
-def pick_openweather_now(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Transforma resposta do OpenWeather em formato simples"""
-
+def pick_openweather_now(data: dict) -> dict:
+    """Extrai condições atuais (ou próximas) do OpenWeather para exibir no card."""
     try:
-        wind_ms = data.get("wind", {}).get("speed")
-        wind_deg = data.get("wind", {}).get("deg")
+        if not data or "list" not in data or not data["list"]:
+            return {}
+
+        now = data["list"][0]  # primeiro horário da previsão (~agora)
+        main = now.get("main", {})
+        weather = now.get("weather", [{}])[0]
+        clouds = now.get("clouds", {}).get("all")
+        wind = now.get("wind", {})
+        rain = now.get("rain", {}).get("3h", 0)
+        pop = now.get("pop", 0) * 100  # probabilidade (%)
 
         return {
-            "wind_speed_kmh": round(float(wind_ms) * 3.6, 1) if isinstance(wind_ms, (int, float)) else None,
-            "wind_direction_deg": wind_deg,
-            "source": "openweather",
+            "temp_c": main.get("temp"),
+            "clouds": clouds,
+            "precip_mm": rain,
+            "precip_probability": round(pop, 1),
+            "wind_speed_kmh": round(wind.get("speed", 0) * 3.6, 1),
+            "wind_dir_deg": wind.get("deg"),
+            "weather_main": weather.get("main"),
+            "weather_desc": weather.get("description"),
         }
 
     except Exception as e:
         print("DEBUG pick_openweather_now error:", e)
-        return None
+        return {}
 
 def fetch_weather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     key = f"openmeteo_weather:{lat:.4f},{lon:.4f}"
