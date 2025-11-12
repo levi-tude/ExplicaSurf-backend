@@ -433,175 +433,141 @@ Na seção final da análise (após "Recomendação final"), inclua um pequeno t
 
 
 # ============== API principal ==============
+# ============== API principal ==============
 @app.get("/api/explain")
 def api_explain():
-    level = (request.args.get("level") or "iniciante").lower()
-    ai_mode = (request.args.get("ai") or "off").lower()
-    day_offset = int(request.args.get("day", 0))
-    day_label = "hoje" if day_offset == 0 else "amanhã" if day_offset == 1 else "depois de amanhã"
+    try:
+        level = (request.args.get("level") or "iniciante").lower()
+        ai_mode = (request.args.get("ai") or "off").lower()
+        day_offset = int(request.args.get("day", 0))
+        day_label = "hoje" if day_offset == 0 else "amanhã" if day_offset == 1 else "depois de amanhã"
 
-    # Perfil do surfista
-    name = request.args.get("name", "Surfista")
-    stance = request.args.get("stance", "").lower()
-    experience_months = int(request.args.get("experience_months", 0))
+        # perfil
+        name = request.args.get("name", "Surfista")
+        stance = (request.args.get("stance") or "").lower()
+        experience_months = int(request.args.get("experience_months", 0))
 
-    om_raw = fetch_open_meteo(LAT, LON)        # ondas
-    wind_raw = fetch_open_meteo_wind(LAT, LON) # vento
-    weather_raw = fetch_weather(LAT, LON)      # clima
+        # ------------------- dados externos -------------------
+        om_raw = fetch_open_meteo(LAT, LON)
+        if not om_raw or "hourly" not in om_raw:
+            # causa mais comum de 500: API não respondeu como esperado
+            print("DEBUG /api/explain: om_raw vazio ou sem 'hourly'", om_raw)
+            return jsonify({"error": "open-meteo indisponível"}), 502
 
-    forecast_series = (
-        build_forecast_series(om_raw, wind_raw, weather_raw)
-        if om_raw and wind_raw and weather_raw else []
-    )
-    # -------------------------------------
+        wind_raw = fetch_open_meteo_wind(LAT, LON)  # ok se vier None
+        forecast_series = build_forecast_series(om_raw, wind_raw) if om_raw else []
 
-    # ponto atual
-    om_point = pick_open_meteo_point(om_raw) if om_raw else None
-    ow_raw = fetch_openweather(LAT, LON)
-    ow_now = pick_openweather_now(ow_raw) if ow_raw else None
-    merged_now = {**(om_point or {}), **(ow_now or {})}
+        # ponto atual (ondas) + vento atual (openweather)
+        om_point = pick_open_meteo_point(om_raw) or {}
+        ow_raw = fetch_openweather(LAT, LON)
+        ow_now = pick_openweather_now(ow_raw) if ow_raw else {}
+        merged_now = {**om_point, **ow_now}
 
-    if "wave_direction_deg" in merged_now and "wave_dir_deg" not in merged_now:
-        merged_now["wave_dir_deg"] = merged_now["wave_direction_deg"]
-    if "wind_direction_deg" in merged_now and "wind_dir_deg" not in merged_now:
-        merged_now["wind_dir_deg"] = merged_now["wind_direction_deg"]
+        # aliases p/ frontend
+        if "wave_direction_deg" in merged_now and "wave_dir_deg" not in merged_now:
+            merged_now["wave_dir_deg"] = merged_now["wave_direction_deg"]
+        if "wind_direction_deg" in merged_now and "wind_dir_deg" not in merged_now:
+            merged_now["wind_dir_deg"] = merged_now["wind_direction_deg"]
 
-    # média do dia selecionado
-    selected_point = None
-    if forecast_series:
-        today = datetime.datetime.now().date()
-        target_day = today + datetime.timedelta(days=day_offset)
-        same_day_points = [
-            p for p in forecast_series
-            if datetime.datetime.fromisoformat(p["time"]).date() == target_day
-        ]
-        if same_day_points:
-            avg_altura = safe_avg([p.get("wave_height_m") for p in same_day_points])
-            avg_periodo = safe_avg([p.get("wave_period_s") for p in same_day_points])
-            avg_vento = safe_avg([p.get("wind_speed_kmh") for p in same_day_points])
-            avg_dir = safe_avg([p.get("wind_dir_deg") for p in same_day_points])
-            selected_point = {
-                "wave_height_m": round(avg_altura, 2),
-                "wave_period_s": round(avg_periodo, 1),
-                "wave_direction_deg": avg_dir,
-                "wind_speed_kmh": round(avg_vento, 1),
-                "wind_direction_deg": avg_dir,
-            }
+        # ------------------- dia selecionado -------------------
+        selected_point = None
+        if forecast_series:
+            today = datetime.datetime.now().date()
+            target_day = today + datetime.timedelta(days=day_offset)
+            same_day_points = [
+                p for p in forecast_series
+                if "time" in p and datetime.datetime.fromisoformat(p["time"]).date() == target_day
+            ]
+            if same_day_points:
+                avg_altura = safe_avg([p.get("wave_height_m") for p in same_day_points])
+                avg_periodo = safe_avg([p.get("wave_period_s") for p in same_day_points])
+                avg_vento  = safe_avg([p.get("wind_speed_kmh") for p in same_day_points])
+                avg_dir    = safe_avg([p.get("wind_dir_deg") for p in same_day_points])
+                selected_point = {
+                    "wave_height_m": round(avg_altura, 2) if avg_altura else None,
+                    "wave_period_s": round(avg_periodo, 1) if avg_periodo else None,
+                    "wave_direction_deg": avg_dir,
+                    "wind_speed_kmh": round(avg_vento, 1) if avg_vento else None,
+                    "wind_direction_deg": avg_dir,
+                }
 
-    # maré
-    tide_raw = get_tide_adjusted(day_offset)
-    tide_processed = {
-        "extremes": tide_raw.get("extremes"),
-        "heights": tide_raw.get("heights"),
-        "now": tide_raw.get("now"),
-        "next_extreme": tide_raw.get("next_extreme"),
-    }
-    tide_peak_text = format_next_tide_peak(tide_processed.get("next_extreme"))
-    wind_trend = wind_trend_summary(forecast_series)
+        # maré e tendências
+        tide_raw = get_tide_adjusted(day_offset) or {}
+        tide_processed = {
+            "extremes":      tide_raw.get("extremes"),
+            "heights":       tide_raw.get("heights"),
+            "now":           tide_raw.get("now"),
+            "next_extreme":  tide_raw.get("next_extreme"),
+        }
+        tide_peak_text = format_next_tide_peak(tide_processed.get("next_extreme"))
+        wind_trend = wind_trend_summary(forecast_series) if forecast_series else ""
 
-    fonte_principal = merged_now
-    if not merged_now.get("wave_height_m") or not merged_now.get("wave_period_s"):
-        fonte_principal = selected_point or merged_now
+        # fonte de verdade para o cartão
+        fonte_principal = merged_now
+        if not fonte_principal.get("wave_height_m") or not fonte_principal.get("wave_period_s"):
+            fonte_principal = selected_point or merged_now
 
-    altura = fonte_principal.get("wave_height_m")
-    periodo = fonte_principal.get("wave_period_s")
-    direcao = fonte_principal.get("wave_direction_deg")
+        altura  = fonte_principal.get("wave_height_m")
+        periodo = fonte_principal.get("wave_period_s")
+        direcao = fonte_principal.get("wave_direction_deg")
 
-    if fonte_principal.get("wave_height_m") and fonte_principal.get("wave_period_s"):
-        energia = fonte_principal["wave_height_m"] * fonte_principal["wave_period_s"]
-        merged_now["energy"] = round(energia, 1)
-        merged_now["energy_level"] = (
-            "Baixa" if energia <= 5 else
-            "Média" if energia <= 12 else
-            "Alta"
-        )
-    else:
-        merged_now["energy"] = None
-        merged_now["energy_level"] = None
+        # energia segura
+        if isinstance(altura, (int, float)) and isinstance(periodo, (int, float)):
+            energia = altura * periodo
+            merged_now["energy"] = round(energia, 1)
+            merged_now["energy_level"] = "Baixa" if energia <= 5 else "Média" if energia <= 12 else "Alta"
+        else:
+            merged_now["energy"] = None
+            merged_now["energy_level"] = None
 
-    if direcao:
-        merged_now["wave_direction_deg"] = direcao
-        merged_now["wave_dir_deg"] = direcao
+        if direcao is not None:
+            merged_now["wave_direction_deg"] = direcao
+            merged_now["wave_dir_deg"] = direcao
 
-    merged_now["tide"] = {
-        "now": tide_processed.get("now", {}),
-        "next_extreme": tide_processed.get("next_extreme", {}),
-    }
+        merged_now["tide"] = {
+            "now": tide_processed.get("now", {}),
+            "next_extreme": tide_processed.get("next_extreme", {}),
+        }
 
-    perceived = classify_perceived_size(
-        (selected_point or merged_now).get("wave_height_m"),
-        (selected_point or merged_now).get("wave_period_s")
-    )
-
-    merged_day = {
-        **(selected_point or {}),
-        "tide": tide_processed,
-        "tide_peak_text": tide_peak_text,
-        "wind_trend_text": wind_trend,
-        "perceived": perceived,
-    }
-
-    print("=== DEBUG PERFIL RECEBIDO ===")
-    print("Nome:", name)
-    print("Base (stance):", stance)
-    print("Experiência (meses):", experience_months)
-    print("=============================")
-
-    explanation_pt = ""
-    if ai_mode == "on" and GEMINI_API_KEY:
-        explanation_pt = explain_with_gemini(
-            level,
-            merged_day,
-            name=name,
-            stance=stance,
-            experience_months=experience_months,
-            day_label=day_label
+        perceived = classify_perceived_size(
+            (selected_point or merged_now).get("wave_height_m"),
+            (selected_point or merged_now).get("wave_period_s"),
         )
 
-    return jsonify({
-        "spot": "Stella Maris, Salvador-BA",
-        "level": level,
-        "day": day_offset,
-        "forecast_now": merged_now,
-        "forecast_series": forecast_series,
-        "forecast_day": merged_day,
-        "explanation_pt": explanation_pt,
-    })
+        merged_day = {
+            **(selected_point or {}),
+            "tide": tide_processed,
+            "tide_peak_text": tide_peak_text,
+            "wind_trend_text": wind_trend,
+            "perceived": perceived,
+        }
 
-# --- health ---
-@app.get("/health")
-def health():
-    return {"ok": True, "service": "ExplicaSurf Backend"}
+        # debug leve
+        print("[/api/explain] ok",
+              {"have_om": bool(om_raw), "pts_series": len(forecast_series),
+               "have_now": bool(merged_now), "ai": ai_mode})
 
-# --- warmup ---
-@app.get("/warmup")
-def warmup():
-    t0 = time.time()
+        explanation_pt = ""
+        if ai_mode == "on" and GEMINI_API_KEY:
+            explanation_pt = explain_with_gemini(
+                level, merged_day, name=name, stance=stance,
+                experience_months=experience_months, day_label=day_label
+            )
 
-    om = fetch_open_meteo(LAT, LON)
-    wind = fetch_open_meteo_wind(LAT, LON)
-    weather = fetch_weather(LAT, LON)
+        return jsonify({
+            "spot": "Stella Maris, Salvador-BA",
+            "level": level,
+            "day": day_offset,
+            "forecast_now": merged_now,
+            "forecast_series": forecast_series,
+            "forecast_day": merged_day,
+            "explanation_pt": explanation_pt,
+        })
 
-    series_len = 0
-    if om and wind and weather:
-        fseries = build_forecast_series(om, wind, weather)
-        series_len = len(fseries)
-
-    tide = get_tide_adjusted(0)
-
-    took_ms = round((time.time() - t0) * 1000)
-    return {
-        "ok": True,
-        "cached": {
-            "open_meteo": bool(om),
-            "open_meteo_wind": bool(wind),
-            "weather": bool(weather),
-            "forecast_series_len": series_len,
-            "tide": bool(tide),
-        },
-        "took_ms": took_ms,
-    }
-
-if __name__ == "__main__":
-     app.run(host="0.0.0.0", port=8000, debug=True)
+    except Exception as e:
+        # loga e devolve JSON (facilita ver a causa nos logs do Render)
+        import traceback
+        print("ERROR /api/explain ->", e)
+        traceback.print_exc()
+        return jsonify({"error": "internal", "detail": str(e)}), 500
 
