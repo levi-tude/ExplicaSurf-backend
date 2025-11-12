@@ -249,6 +249,30 @@ def pick_openweather_now(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         print("DEBUG pick_openweather_now error:", e)
         return None
 
+def fetch_weather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
+    key = f"openmeteo_weather:{lat:.4f},{lon:.4f}"
+    cached = cache.get(key)
+    if cached:
+        return cached
+
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "precipitation,precipitation_probability,cloudcover,temperature_2m",
+        "timezone": "auto",
+    }
+
+    try:
+        r = httpx.get(url, params=params, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        cache.set(key, data)
+        return data
+    except Exception as e:
+        print("DEBUG fetch_weather error:", e)
+        return None
+
 # ============== Forecast builder ==============
 def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
     """
@@ -455,7 +479,9 @@ def api_explain():
             return jsonify({"error": "open-meteo indisponível"}), 502
 
         wind_raw = fetch_open_meteo_wind(LAT, LON)  # ok se vier None
-        forecast_series = build_forecast_series(om_raw, wind_raw) if om_raw else []
+        weather_raw = fetch_weather(LAT, LON)
+        forecast_series = build_forecast_series(om_raw, wind_raw, weather_raw)
+         if om_raw else []
 
         # ponto atual (ondas) + vento atual (openweather)
         om_point = pick_open_meteo_point(om_raw) or {}
