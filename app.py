@@ -14,12 +14,25 @@ CORS(app)
 # ============== Redis Cache ==============
 from flask_caching import Cache
 
-app.config["CACHE_TYPE"] = "RedisCache"
-app.config["CACHE_REDIS_URL"] = os.getenv("REDIS_URL")
-app.config["CACHE_DEFAULT_TIMEOUT"] = 300
+REDIS_URL = os.getenv("REDIS_URL")
+
+# Parse host, port e password
+parsed = REDIS_URL.replace("redis://", "").replace("rediss://", "")
+userpass, hostport = parsed.split("@")
+password = userpass.split(":")[1]
+host, port = hostport.split(":")
+
+app.config.update({
+    "CACHE_TYPE": "RedisCache",
+    "CACHE_REDIS_HOST": host,
+    "CACHE_REDIS_PORT": int(port),
+    "CACHE_REDIS_PASSWORD": password,
+    "CACHE_DEFAULT_TIMEOUT": 300,
+})
 
 cache = Cache(app)
 
+# ============== Variáveis Principais ==============
 LAT = float(os.getenv("LAT", "-12.9437"))
 LON = float(os.getenv("LON", "-38.3539"))
 
