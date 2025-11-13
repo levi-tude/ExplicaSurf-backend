@@ -453,7 +453,7 @@ Evite ordens absolutas; prefira linguagem de orientação e avaliação de risco
 Se precisar usar termos técnicos para iniciantes, explique rapidamente o significado e siga simples.
 
 CONTEXTO DO DIA:
-- Esta explicação deve se referir às condições de {day_label}. Se {day_label} não for hoje, descreva de forma prospectiva (ex.: “amanhã tende a...”).
+- Esta explicação deve se referir às condições de {day_label}. Se {day_label} não for hoje, descreva de forma prospectiva (ex.: “amanhã tende a...”)
 
 📌 Instruções de personalização:
 - Sempre comece a explicação citando o surfista de forma natural, por exemplo:
@@ -462,7 +462,9 @@ CONTEXTO DO DIA:
 - Para iniciantes, explique de forma acessível; para avançados, use termos mais técnicos e objetivos.
 - Não repita o nome em todas as frases — apenas no início.
 - Sempre mencione se favorece as direitas ou esquerdas com base na direção do swell.
-- Saiba sempre  que se a pessoa for goofy a onda para esquerda vai ser frontside e para direita backside, e vice-versa para regular( direita frontside e esquerda backside). Mas isso serve de conhecimento para melhorar a explicação e não necessáriamente precisa explicar explicitamente isso na resposta.
+- Saiba sempre que se a pessoa for goofy a onda para esquerda vai ser frontside e para direita backside, e vice-versa para regular (direita frontside e esquerda backside). Mas isso serve de conhecimento para melhorar a explicação e não necessáriamente precisa explicar explicitamente isso na resposta.
+- Inclua também uma breve descrição das condições do tempo previstas para o horário do surf (temperatura, cobertura de nuvens e chance de chuva), explicando como isso pode influenciar a experiência na água (visibilidade, conforto térmico e possíveis pancadas rápidas).
+
 DADOS DO SURFISTA:
 - Nome: {name}
 - Experiência: {experience_text}
@@ -489,10 +491,10 @@ Maré e sua influência:
 Estrutura da saída (sem símbolos; use exatamente estes subtítulos seguidos de dois pontos):
 
 Análise geral:
-Descreva como está o mar agora, considerando altura, período, energia percebida e vento (fraco, moderado, forte), se está liso ou mexido, e a tendência do swell. Relacione também o efeito da maré atual. Se houver tendência de vento para 6h, inclua nesta seção ao final.
+Descreva como está o mar agora, considerando altura, período, energia percebida e vento (fraco, moderado, forte), se está liso ou mexido, e a tendência do swell. Relacione também o efeito da maré atual. Se houver tendência do vento para 6h, inclua nesta seção ao final. Inclua também um comentário curto sobre o tempo (temperatura, nuvens e chance de chuva) e como isso pode afetar o surf.
 
 Impacto para surfistas do nível {level}:
-Explique o que esse cenário significa para esse nível: facilidade/dificuldade, se é bom para treinar, se a direção do swell favorece direitas ou esquerdas, e como a maré influencia para esse nível.  
+Explique o que esse cenário significa para esse nível: facilidade/dificuldade, se é bom para treinar, se a direção do swell favorece direitas ou esquerdas, e como a maré influencia para esse nível.
 Use também a base ({stance_text}) para comentar se as ondas estarão de frente (frontside) ou de costas (backside).
 
 Recomendação final:
@@ -516,11 +518,11 @@ Tendência do vento (6h): {merged.get("wind_trend_text","")}
 IMPORTANTE:
 Na seção final da análise (após "Recomendação final"), inclua um pequeno trecho que diga se o mar deve subir ou cair ao longo do dia, se o vento tende a entrar ou não, e se existe uma boa janela de maré/vento para surfar.
 """
+
     try:
         return call_gemini_http(prompt, GEMINI_MODEL)
     except Exception as e:
         return f"Erro ao usar Gemini: {e}"
-
 
 # ============== API principal ==============
 @app.get("/api/explain")
