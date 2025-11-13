@@ -11,6 +11,15 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+# ============== Redis Cache ==============
+from flask_caching import Cache
+
+cache = Cache(app, config={
+    "CACHE_TYPE": "RedisCache",
+    "CACHE_REDIS_URL": os.getenv("REDIS_URL"),
+    "CACHE_DEFAULT_TIMEOUT": 300  # 5 minutos
+})
+
 LAT = float(os.getenv("LAT", "-12.9437"))
 LON = float(os.getenv("LON", "-38.3539"))
 
@@ -21,27 +30,6 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 print("DEBUG - GEMINI_MODEL carregado do .env:", GEMINI_MODEL)
 print("DEBUG - OPENWEATHER_API_KEY set:", bool(OPENWEATHER_API_KEY))
 print("DEBUG - GEMINI_API_KEY set:", bool(GEMINI_API_KEY))
-
-# ============== Cache simples (TTL) ==============
-class TTLCache:
-    def __init__(self, ttl_seconds: int = 300):
-        self.ttl = ttl_seconds
-        self.store: Dict[str, Any] = {}
-
-    def get(self, key: str) -> Optional[TypingAny]:
-        item = self.store.get(key)
-        if not item:
-            return None
-        ts, value = item
-        if time.time() - ts > self.ttl:
-            self.store.pop(key, None)
-            return None
-        return value
-
-    def set(self, key: str, value: TypingAny) -> None:
-        self.store[key] = (time.time(), value)
-
-cache = TTLCache(ttl_seconds=180)
 
 # ============== Helpers ==============
 def parse_iso_list(iso_list: List[str]) -> List[datetime.datetime]:
@@ -680,4 +668,14 @@ def api_explain():
         print("ERROR /api/explain ->", e)
         traceback.print_exc()
         return jsonify({"error": "internal", "detail": str(e)}), 500
+
+# ============== Teste do Redis Cache ==============
+@app.get("/teste-cache")
+@cache.cached(timeout=20)
+def teste_cache():
+    import time
+    agora = time.time()
+    time.sleep(3)  # simula operação lenta
+    return {"ts": agora}
+
 
