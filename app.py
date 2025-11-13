@@ -287,6 +287,57 @@ def fetch_weather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print("DEBUG fetch_weather error:", e)
         return None
+        
+def pick_weather_for_day(weather_raw: dict, day_offset: int) -> dict:
+    """
+    Retorna temperatura, nuvens e precipitação do dia selecionado (0 = hoje, 1 = amanhã, 2 = depois).
+    Sempre tenta pegar o horário de 12:00 do dia alvo.
+    """
+    try:
+        if not weather_raw or "hourly" not in weather_raw:
+            return {}
+
+        hourly = weather_raw["hourly"]
+        times = hourly.get("time", [])
+
+        if not times:
+            return {}
+
+        # Dia desejado
+        target_date = (datetime.datetime.now().date() + datetime.timedelta(days=day_offset))
+
+        # Procurar índice do horário das 12:00
+        idx_match = None
+        for i, t in enumerate(times):
+            dt = datetime.datetime.fromisoformat(t)
+            if dt.date() == target_date and dt.hour == 12:  # 12h = horário padrão estável
+                idx_match = i
+                break
+
+        # Se não achou 12h, pega o horário mais próximo daquele dia
+        if idx_match is None:
+            candidates = [
+                (i, abs((datetime.datetime.fromisoformat(t).date() - target_date).days))
+                for i, t in enumerate(times)
+            ]
+            idx_match = min(candidates, key=lambda x: x[1])[0]
+
+        # Extrair valores
+        temp = hourly.get("temperature_2m", [None])[idx_match]
+        clouds = hourly.get("cloudcover", [None])[idx_match]
+        precip = hourly.get("precipitation", [None])[idx_match]
+        pop = hourly.get("precipitation_probability", [None])[idx_match]
+
+        return {
+            "temp_c": temp,
+            "clouds": clouds,
+            "precip_mm": precip,
+            "precip_probability": pop,
+        }
+
+    except Exception as e:
+        print("DEBUG pick_weather_for_day error:", e)
+        return {}
 
 # ============== Forecast builder ==============
 def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
@@ -498,12 +549,19 @@ def api_explain():
             build_forecast_series(om_raw, wind_raw, weather_raw)
             if om_raw
             else []
+        weather_point = pick_weather_for_day(weather_raw, day_offset)
 )
         # ponto atual (ondas) + vento atual (openweather)
         om_point = pick_open_meteo_point(om_raw) or {}
         ow_raw = fetch_openweather(LAT, LON)
         ow_now = pick_openweather_now(ow_raw) if ow_raw else {}
         merged_now = {**om_point, **ow_now}
+        # Misturar clima correto (por dia)
+        if day_offset == 0:
+            merged_now.update(weather_point)
+        else:
+            if selected_point:
+                selected_point.update(weather_point)
 
         # aliases p/ frontend
         if "wave_direction_deg" in merged_now and "wave_dir_deg" not in merged_now:
