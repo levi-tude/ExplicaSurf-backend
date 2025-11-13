@@ -549,8 +549,9 @@ def api_explain():
             build_forecast_series(om_raw, wind_raw, weather_raw)
             if om_raw
             else []
+        )
         weather_point = pick_weather_for_day(weather_raw, day_offset)
-)
+
         # ponto atual (ondas) + vento atual (openweather)
         om_point = pick_open_meteo_point(om_raw) or {}
         ow_raw = fetch_openweather(LAT, LON)
