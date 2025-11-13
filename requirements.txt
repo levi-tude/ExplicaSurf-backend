@@ -9,4 +9,3 @@ gunicorn==21.2.0
 flask-caching==2.1.0
 redis==5.0.1
 
-cacheflush==1.0.0
