@@ -536,112 +536,119 @@ def api_explain():
         stance = (request.args.get("stance") or "").lower()
         experience_months = int(request.args.get("experience_months", 0))
 
+       
         # ------------------- dados externos -------------------
         om_raw = fetch_open_meteo(LAT, LON)
         if not om_raw or "hourly" not in om_raw:
-            # causa mais comum de 500: API não respondeu como esperado
             print("DEBUG /api/explain: om_raw vazio ou sem 'hourly'", om_raw)
             return jsonify({"error": "open-meteo indisponível"}), 502
 
-        wind_raw = fetch_open_meteo_wind(LAT, LON)  # ok se vier None
+        wind_raw = fetch_open_meteo_wind(LAT, LON)
         weather_raw = fetch_weather(LAT, LON)
+
         forecast_series = (
             build_forecast_series(om_raw, wind_raw, weather_raw)
-            if om_raw
-            else []
-        )
+            if om_raw else []
+)
+
+# ========= 1. CLIMA DO DIA =========
         weather_point = pick_weather_for_day(weather_raw, day_offset)
 
-        # ponto atual (ondas) + vento atual (openweather)
+# ========= 2. PONTO ATUAL (ONDA + VENTO + CLIMA ATUAL) =========
         om_point = pick_open_meteo_point(om_raw) or {}
         ow_raw = fetch_openweather(LAT, LON)
         ow_now = pick_openweather_now(ow_raw) if ow_raw else {}
-        merged_now = {**om_point, **ow_now}
-        # Misturar clima correto (por dia)
+        merged_now = {**om_point, **ow_now}   # ponto AGORA real
+
+# HOJE recebe clima do dia
         if day_offset == 0:
             merged_now.update(weather_point)
-        else:
-            if selected_point:
-                selected_point.update(weather_point)
 
-        # aliases p/ frontend
-        if "wave_direction_deg" in merged_now and "wave_dir_deg" not in merged_now:
-            merged_now["wave_dir_deg"] = merged_now["wave_direction_deg"]
-        if "wind_direction_deg" in merged_now and "wind_dir_deg" not in merged_now:
-            merged_now["wind_dir_deg"] = merged_now["wind_direction_deg"]
-
-        # ------------------- dia selecionado -------------------
+# ========= 3. PONTO DO DIA (AMANHÃ/DEPOIS = MÉDIA) =========
         selected_point = None
         if forecast_series:
             today = datetime.datetime.now().date()
             target_day = today + datetime.timedelta(days=day_offset)
+
             same_day_points = [
                 p for p in forecast_series
                 if "time" in p and datetime.datetime.fromisoformat(p["time"]).date() == target_day
-            ]
-            if same_day_points:
-                avg_altura = safe_avg([p.get("wave_height_m") for p in same_day_points])
-                avg_periodo = safe_avg([p.get("wave_period_s") for p in same_day_points])
-                avg_vento  = safe_avg([p.get("wind_speed_kmh") for p in same_day_points])
-                avg_dir    = safe_avg([p.get("wind_dir_deg") for p in same_day_points])
-                selected_point = {
-                    "wave_height_m": round(avg_altura, 2) if avg_altura else None,
-                    "wave_period_s": round(avg_periodo, 1) if avg_periodo else None,
-                    "wave_direction_deg": avg_dir,
-                    "wind_speed_kmh": round(avg_vento, 1) if avg_vento else None,
-                    "wind_direction_deg": avg_dir,
-                }
+    ]
 
-        # maré e tendências
+            if same_day_points:
+                avg_altura  = safe_avg([p.get("wave_height_m") for p in same_day_points])
+                avg_periodo = safe_avg([p.get("wave_period_s") for p in same_day_points])
+                avg_vento   = safe_avg([p.get("wind_speed_kmh") for p in same_day_points])
+                avg_dir     = safe_avg([p.get("wind_dir_deg") for p in same_day_points])
+
+            selected_point = {
+                "wave_height_m": round(avg_altura, 2) if avg_altura else None,
+                "wave_period_s": round(avg_periodo, 1) if avg_periodo else None,
+                "wave_direction_deg": avg_dir,
+                "wind_speed_kmh": round(avg_vento, 1) if avg_vento else None,
+                "wind_direction_deg": avg_dir,
+        }
+
+# AMANHÃ e DEPOIS recebem clima do dia
+        if day_offset != 0 and selected_point:
+            selected_point.update(weather_point)
+
+# ========= 4. MARÉ =========
         tide_raw = get_tide_adjusted(day_offset) or {}
         tide_processed = {
             "extremes":      tide_raw.get("extremes"),
             "heights":       tide_raw.get("heights"),
             "now":           tide_raw.get("now"),
             "next_extreme":  tide_raw.get("next_extreme"),
-        }
+}
+
         tide_peak_text = format_next_tide_peak(tide_processed.get("next_extreme"))
         wind_trend = wind_trend_summary(forecast_series) if forecast_series else ""
 
-        # fonte de verdade para o cartão
-        fonte_principal = merged_now
-        if not fonte_principal.get("wave_height_m") or not fonte_principal.get("wave_period_s"):
-            fonte_principal = selected_point or merged_now
+# ========= 5. ONDAS FINAL PARA O CARD =========
+        fonte_principal = merged_now if day_offset == 0 else selected_point
+
+        if not fonte_principal:
+            fonte_principal = merged_now  # fallback
 
         altura  = fonte_principal.get("wave_height_m")
         periodo = fonte_principal.get("wave_period_s")
         direcao = fonte_principal.get("wave_direction_deg")
 
-        # energia segura
+# Energia
         if isinstance(altura, (int, float)) and isinstance(periodo, (int, float)):
             energia = altura * periodo
-            merged_now["energy"] = round(energia, 1)
-            merged_now["energy_level"] = "Baixa" if energia <= 5 else "Média" if energia <= 12 else "Alta"
-        else:
-            merged_now["energy"] = None
-            merged_now["energy_level"] = None
+            fonte_principal["energy"] = round(energia, 1)
+            fonte_principal["energy_level"] = (
+                "Baixa" if energia <= 5 else
+                "Média" if energia <= 12 else
+                "Alta"
+    )
 
+# Aliases
         if direcao is not None:
-            merged_now["wave_direction_deg"] = direcao
-            merged_now["wave_dir_deg"] = direcao
+            fonte_principal["wave_direction_deg"] = direcao
+            fonte_principal["wave_dir_deg"] = direcao
 
+# Maré dentro do forecast_now (hoje)
         merged_now["tide"] = {
             "now": tide_processed.get("now", {}),
             "next_extreme": tide_processed.get("next_extreme", {}),
-        }
+}
 
+# ========= 6. CARD FINAL PARA O FRONT =========
         perceived = classify_perceived_size(
-            (selected_point or merged_now).get("wave_height_m"),
-            (selected_point or merged_now).get("wave_period_s"),
-        )
+            fonte_principal.get("wave_height_m"),
+            fonte_principal.get("wave_period_s"),
+)
 
         merged_day = {
-            **(selected_point or {}),
+            **(fonte_principal or {}),
             "tide": tide_processed,
             "tide_peak_text": tide_peak_text,
             "wind_trend_text": wind_trend,
             "perceived": perceived,
-        }
+}
 
         # debug leve
         print("[/api/explain] ok",
