@@ -2,7 +2,8 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import os, time, datetime, httpx
-from typing import Any, Dict, Optional, List, Any as TypingAny
+from typing import Any, Dict, Optional, List, Tuple
+import google.generativeai as genai
 from services.tide_worldtides import get_tide_adjusted
 
 # ============== Config & App ==============
@@ -14,37 +15,52 @@ CORS(app)
 # ============== Redis Cache ==============
 from flask_caching import Cache
 
-REDIS_URL = os.getenv("REDIS_URL")
-
-# Parse host, port e password
-parsed = REDIS_URL.replace("redis://", "").replace("rediss://", "")
-userpass, hostport = parsed.split("@")
-password = userpass.split(":")[1]
-host, port = hostport.split(":")
-
-app.config.update({
+cache = Cache(app, config={
     "CACHE_TYPE": "RedisCache",
-    "CACHE_REDIS_HOST": host,
-    "CACHE_REDIS_PORT": int(port),
-    "CACHE_REDIS_PASSWORD": password,
-    "CACHE_DEFAULT_TIMEOUT": 300,
+    "CACHE_REDIS_URL": os.getenv("REDIS_URL"),
+    "CACHE_DEFAULT_TIMEOUT": 300  # 5 minutos
 })
 
-cache = Cache(app)
-
-# ============== Variáveis Principais ==============
 LAT = float(os.getenv("LAT", "-12.9437"))
 LON = float(os.getenv("LON", "-38.3539"))
 
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY") or ""
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or ""
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODELS_FALLBACK = list(dict.fromkeys([
+    GEMINI_MODEL,
+    "gemini-2.0-flash-001",
+    "gemini-1.5-flash",
+    "gemini-2.5-flash",
+]))
+
+TIMEZONE = "America/Bahia"
+LOCAL_TZ = datetime.timezone(datetime.timedelta(hours=-3))
+CACHE_VERSION = "v2"
 
 print("DEBUG - GEMINI_MODEL carregado do .env:", GEMINI_MODEL)
 print("DEBUG - OPENWEATHER_API_KEY set:", bool(OPENWEATHER_API_KEY))
 print("DEBUG - GEMINI_API_KEY set:", bool(GEMINI_API_KEY))
 
 # ============== Helpers ==============
+def cache_get(key: str):
+    try:
+        return cache.get(key)
+    except Exception as e:
+        print("DEBUG cache get error:", e)
+        return None
+
+def cache_set(key: str, value: Any, timeout: int = 300):
+    try:
+        cache.set(key, value, timeout=timeout)
+    except Exception as e:
+        print("DEBUG cache set error:", e)
+
+def hourly_time_key(iso_str: str) -> str:
+    if not iso_str:
+        return ""
+    return iso_str[:16]
+
 def parse_iso_list(iso_list: List[str]) -> List[datetime.datetime]:
     return [datetime.datetime.fromisoformat(t) for t in iso_list]
 
@@ -130,8 +146,8 @@ def fetch_open_meteo(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     """
     🔁 usa a Marine API para dados de ONDAS.
     """
-    key = f"openmeteo_marine:{lat:.4f},{lon:.4f}"
-    cached = cache.get(key)
+    key = f"{CACHE_VERSION}:openmeteo_marine:{lat:.4f},{lon:.4f}"
+    cached = cache_get(key)
     if cached:
         return cached
 
@@ -141,13 +157,14 @@ def fetch_open_meteo(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         "longitude": lon,
         "hourly": "wave_height,wave_period,wave_direction",
         "length_unit": "metric",
-        "timezone": "auto",
+        "timezone": TIMEZONE,
+        "forecast_days": 7,
     }
     try:
-        r = httpx.get(url, params=params, timeout=15)
+        r = httpx.get(url, params=params, timeout=20)
         r.raise_for_status()
         data = r.json()
-        cache.set(key, data)
+        cache_set(key, data)
         return data
     except Exception as e:
         print("DEBUG Open-Meteo Marine error:", e)
@@ -156,8 +173,8 @@ def fetch_open_meteo(lat: float, lon: float) -> Optional[Dict[str, Any]]:
 
 def fetch_open_meteo_wind(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     """vento de 10m da Open-Meteo"""
-    key = f"openmeteo_wind:{lat:.4f},{lon:.4f}"
-    cached = cache.get(key)
+    key = f"{CACHE_VERSION}:openmeteo_wind:{lat:.4f},{lon:.4f}"
+    cached = cache_get(key)
     if cached:
         return cached
 
@@ -167,13 +184,14 @@ def fetch_open_meteo_wind(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         "longitude": lon,
         "hourly": "wind_speed_10m,wind_direction_10m",
         "windspeed_unit": "kmh",
-        "timezone": "auto",
+        "timezone": TIMEZONE,
+        "forecast_days": 7,
     }
     try:
-        r = httpx.get(url, params=params, timeout=15)
+        r = httpx.get(url, params=params, timeout=20)
         r.raise_for_status()
         data = r.json()
-        cache.set(key, data)
+        cache_set(key, data)
         return data
     except Exception as e:
         print("DEBUG Open-Meteo Wind error:", e)
@@ -210,8 +228,8 @@ def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         print("DEBUG OpenWeather: nenhuma API_KEY configurada")
         return None
 
-    key = f"openweather:{lat:.4f},{lon:.4f}"
-    cached = cache.get(key)
+    key = f"{CACHE_VERSION}:openweather:{lat:.4f},{lon:.4f}"
+    cached = cache_get(key)
     if cached:
         return cached
 
@@ -229,7 +247,7 @@ def fetch_openweather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         r = httpx.get(url, params=params, timeout=15)
         r.raise_for_status()
         data = r.json()
-        cache.set(key, data)
+        cache_set(key, data)
         return data
     except Exception as e:
         print("DEBUG OpenWeather error:", e)
@@ -266,8 +284,8 @@ def pick_openweather_now(data: dict) -> dict:
         return {}
 
 def fetch_weather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
-    key = f"openmeteo_weather:{lat:.4f},{lon:.4f}"
-    cached = cache.get(key)
+    key = f"{CACHE_VERSION}:openmeteo_weather:{lat:.4f},{lon:.4f}"
+    cached = cache_get(key)
     if cached:
         return cached
 
@@ -276,19 +294,132 @@ def fetch_weather(lat: float, lon: float) -> Optional[Dict[str, Any]]:
         "latitude": lat,
         "longitude": lon,
         "hourly": "precipitation,precipitation_probability,cloudcover,temperature_2m",
-        "timezone": "auto",
+        "timezone": TIMEZONE,
+        "forecast_days": 7,
     }
 
     try:
-        r = httpx.get(url, params=params, timeout=10)
+        r = httpx.get(url, params=params, timeout=20)
         r.raise_for_status()
         data = r.json()
-        cache.set(key, data)
+        cache_set(key, data)
         return data
     except Exception as e:
         print("DEBUG fetch_weather error:", e)
         return None
-        
+
+
+def pick_openweather_for_day(ow_raw: dict, day_offset: int) -> dict:
+    """Fallback de clima/vento por dia via OpenWeather (slots de 3h)."""
+    try:
+        if not ow_raw or "list" not in ow_raw:
+            return {}
+
+        target_date = datetime.datetime.now(LOCAL_TZ).date() + datetime.timedelta(days=day_offset)
+        items = [
+            it for it in ow_raw["list"]
+            if datetime.datetime.fromtimestamp(it["dt"], tz=LOCAL_TZ).date() == target_date
+        ]
+        if not items:
+            return {}
+
+        temps, clouds, precip, pops, winds, dirs = [], [], [], [], [], []
+        for it in items:
+            main = it.get("main", {})
+            wind = it.get("wind", {})
+            temps.append(main.get("temp"))
+            clouds.append(it.get("clouds", {}).get("all"))
+            precip.append(it.get("rain", {}).get("3h", 0))
+            pops.append((it.get("pop") or 0) * 100)
+            winds.append(round((wind.get("speed") or 0) * 3.6, 1))
+            dirs.append(wind.get("deg"))
+
+        return {
+            "temp_c": safe_avg(temps) or None,
+            "clouds": round(safe_avg(clouds)) if clouds else None,
+            "precip_mm": round(safe_avg(precip), 2) if precip else 0,
+            "precip_probability": round(safe_avg(pops), 1) if pops else 0,
+            "wind_speed_kmh": round(safe_avg(winds), 1) if winds else None,
+            "wind_dir_deg": round(safe_avg(dirs)) if dirs else None,
+        }
+    except Exception as e:
+        print("DEBUG pick_openweather_for_day error:", e)
+        return {}
+
+
+def build_openweather_lookup(ow_raw: dict) -> Dict[str, Dict[str, Any]]:
+    lookup: Dict[str, Dict[str, Any]] = {}
+    if not ow_raw or "list" not in ow_raw:
+        return lookup
+
+    for item in ow_raw["list"]:
+        dt_unix = item.get("dt")
+        if not dt_unix:
+            continue
+        local_dt = datetime.datetime.fromtimestamp(dt_unix, tz=LOCAL_TZ)
+        key = local_dt.strftime("%Y-%m-%dT%H:%M")
+        main = item.get("main", {})
+        wind = item.get("wind", {})
+        lookup[key] = {
+            "wind_speed_kmh": round((wind.get("speed") or 0) * 3.6, 1),
+            "wind_dir_deg": wind.get("deg"),
+            "temp_c": main.get("temp"),
+            "clouds": item.get("clouds", {}).get("all"),
+            "precip_mm": item.get("rain", {}).get("3h", 0),
+            "precip_probability": round((item.get("pop") or 0) * 100, 1),
+        }
+    return lookup
+
+
+def enrich_series_from_openweather(
+    series: List[Dict[str, Any]],
+    ow_raw: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Preenche vento/clima na série horária quando Open-Meteo falhar."""
+    lookup = build_openweather_lookup(ow_raw or {})
+    if not lookup or not series:
+        return series
+
+    parsed_lookup: Dict[str, datetime.datetime] = {}
+    for key in lookup:
+        try:
+            parsed_lookup[key] = datetime.datetime.fromisoformat(key)
+        except ValueError:
+            continue
+
+    for point in series:
+        t_key = hourly_time_key(point.get("time", ""))
+        ow = lookup.get(t_key)
+        if not ow and t_key and parsed_lookup:
+            try:
+                pt = datetime.datetime.fromisoformat(t_key)
+                nearest_key = min(
+                    parsed_lookup,
+                    key=lambda k: abs((parsed_lookup[k] - pt).total_seconds()),
+                )
+                if abs((parsed_lookup[nearest_key] - pt).total_seconds()) <= 7200:
+                    ow = lookup[nearest_key]
+            except ValueError:
+                ow = None
+
+        if not ow:
+            continue
+
+        if point.get("wind_speed_kmh") is None:
+            point["wind_speed_kmh"] = ow.get("wind_speed_kmh")
+        if point.get("wind_dir_deg") is None:
+            point["wind_dir_deg"] = ow.get("wind_dir_deg")
+        if point.get("temp_c") is None:
+            point["temp_c"] = ow.get("temp_c")
+        if point.get("clouds") in (None, 0):
+            point["clouds"] = ow.get("clouds")
+        if not point.get("precip_mm"):
+            point["precip_mm"] = ow.get("precip_mm")
+        if not point.get("precip_probability"):
+            point["precip_probability"] = ow.get("precip_probability")
+
+    return series
+
 def pick_weather_for_day(weather_raw: dict, day_offset: int) -> dict:
     """
     Retorna temperatura, nuvens e precipitação do dia selecionado (0 = hoje, 1 = amanhã, 2 = depois).
@@ -341,6 +472,26 @@ def pick_weather_for_day(weather_raw: dict, day_offset: int) -> dict:
         return {}
 
 # ============== Forecast builder ==============
+def build_hourly_field_map(
+    raw: Optional[Dict[str, Any]],
+    field_names: List[str],
+) -> Tuple[List[str], Dict[str, Dict[str, Any]]]:
+    """Monta mapa {hora -> {campo: valor}} a partir de hourly Open-Meteo."""
+    field_map: Dict[str, Dict[str, Any]] = {}
+    if not raw:
+        return [], field_map
+
+    hourly = raw.get("hourly", {})
+    times = hourly.get("time", [])
+    for field in field_names:
+        values = hourly.get(field, [])
+        for i, t in enumerate(times):
+            key = hourly_time_key(t)
+            field_map.setdefault(key, {})[field] = values[i] if i < len(values) else None
+
+    return times, field_map
+
+
 def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
     """
     Une: ondas (marine), vento 10m e clima (precipitação, nuvens, temperatura).
@@ -353,28 +504,31 @@ def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
         periods = h.get("wave_period", [])
         dirs = h.get("wave_direction", [])
 
-        # vento
-        wind_map = {}
-        if wind_raw:
-            hw = wind_raw.get("hourly", {})
-            wt = hw.get("time", [])
-            wsp = hw.get("wind_speed_10m", [])
-            wdg = hw.get("wind_direction_10m", [])
-            for i in range(min(len(wt), len(wsp), len(wdg))):
-                wind_map[wt[i]] = (wsp[i], wdg[i])
-
-        # clima
-        precip = precip_prob = clouds = temps = []
-        if weather_raw:
-            hwx = weather_raw.get("hourly", {})
-            precip = hwx.get("precipitation", [])
-            precip_prob = hwx.get("precipitation_probability", [])
-            clouds = hwx.get("cloudcover", [])
-            temps = hwx.get("temperature_2m", [])
+        _, wind_map = build_hourly_field_map(
+            wind_raw,
+            ["wind_speed_10m", "wind_direction_10m"],
+        )
+        _, weather_map = build_hourly_field_map(
+            weather_raw,
+            ["precipitation", "precipitation_probability", "cloudcover", "temperature_2m"],
+        )
 
         series = []
         for i, t in enumerate(times):
-            spd, dir10 = wind_map.get(t, (None, None))
+            t_key = hourly_time_key(t)
+            wind_point = wind_map.get(t_key, {})
+            weather_point = weather_map.get(t_key, {})
+
+            spd = wind_point.get("wind_speed_10m")
+            dir10 = wind_point.get("wind_direction_10m")
+
+            # fallback por índice quando timestamps divergem levemente
+            if spd is None and wind_raw:
+                hw = wind_raw.get("hourly", {})
+                if i < len(hw.get("wind_speed_10m", [])):
+                    spd = hw["wind_speed_10m"][i]
+                    dir10 = hw.get("wind_direction_10m", [None])[i]
+
             altura = heights[i] if i < len(heights) else None
             periodo = periods[i] if i < len(periods) else None
             energia = altura * periodo if altura and periodo else None
@@ -383,6 +537,20 @@ def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
                 "Média" if energia and energia <= 12 else
                 "Alta" if energia else None
             )
+
+            precip = weather_point.get("precipitation")
+            precip_prob = weather_point.get("precipitation_probability")
+            clouds = weather_point.get("cloudcover")
+            temp = weather_point.get("temperature_2m")
+
+            if temp is None and weather_raw:
+                hwx = weather_raw.get("hourly", {})
+                if i < len(hwx.get("temperature_2m", [])):
+                    temp = hwx["temperature_2m"][i]
+                    clouds = hwx.get("cloudcover", [None])[i]
+                    precip = hwx.get("precipitation", [None])[i]
+                    precip_prob = hwx.get("precipitation_probability", [None])[i]
+
             series.append({
                 "time": t,
                 "wave_height_m": altura,
@@ -392,10 +560,10 @@ def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
                 "wind_dir_deg": dir10,
                 "energy": round(energia, 1) if energia else None,
                 "energy_level": energia_level,
-                "precip_mm": precip[i] if i < len(precip) else 0,
-                "precip_probability": precip_prob[i] if i < len(precip_prob) else 0,
-                "clouds": clouds[i] if i < len(clouds) else 0,
-                "temp_c": temps[i] if i < len(temps) else None,
+                "precip_mm": precip if precip is not None else 0,
+                "precip_probability": precip_prob if precip_prob is not None else 0,
+                "clouds": clouds if clouds is not None else 0,
+                "temp_c": temp,
             })
         return series
     except Exception as e:
@@ -403,13 +571,27 @@ def build_forecast_series(om_raw, wind_raw=None, weather_raw=None):
         return []
 
 # ============== Gemini prompt ==============
-def call_gemini_http(prompt: str, model_name: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    r = httpx.post(url, json=payload, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+def call_gemini_http(prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY não configurada")
+
+    genai.configure(api_key=GEMINI_API_KEY)
+    last_error: Optional[Exception] = None
+
+    for model_name in GEMINI_MODELS_FALLBACK:
+        try:
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            text = (response.text or "").strip()
+            if text:
+                print(f"DEBUG Gemini ok model={model_name}")
+                return text
+        except Exception as e:
+            last_error = e
+            print(f"DEBUG Gemini fail model={model_name}:", e)
+            continue
+
+    raise last_error or RuntimeError("Nenhum modelo Gemini disponível")
 
 def explain_with_gemini(
     level: str,
@@ -521,9 +703,15 @@ Na seção final da análise (após "Recomendação final"), inclua um pequeno t
 """
 
     try:
-        return call_gemini_http(prompt, GEMINI_MODEL)
+        return call_gemini_http(prompt)
     except Exception as e:
-        return f"Erro ao usar Gemini: {e}"
+        err = str(e)
+        if "API key" in err or "API_KEY" in err:
+            return (
+                "Erro ao usar Gemini: chave de API inválida ou sem permissão. "
+                "Verifique GEMINI_API_KEY no painel do Render e se a API Generative Language está ativa."
+            )
+        return f"Erro ao usar Gemini: {err.split('key=')[0].strip()}"
 
 # ============== API principal ==============
 @app.get("/api/explain")
@@ -548,18 +736,18 @@ def api_explain():
 
         wind_raw = fetch_open_meteo_wind(LAT, LON)
         weather_raw = fetch_weather(LAT, LON)
+        ow_raw = fetch_openweather(LAT, LON)
 
-        forecast_series = (
-            build_forecast_series(om_raw, wind_raw, weather_raw)
-            if om_raw else []
-)
+        forecast_series = build_forecast_series(om_raw, wind_raw, weather_raw)
+        forecast_series = enrich_series_from_openweather(forecast_series, ow_raw)
 
 # ========= 1. CLIMA DO DIA =========
         weather_point = pick_weather_for_day(weather_raw, day_offset)
+        if not weather_point and ow_raw:
+            weather_point = pick_openweather_for_day(ow_raw, day_offset)
 
 # ========= 2. PONTO ATUAL (ONDA + VENTO + CLIMA ATUAL) =========
         om_point = pick_open_meteo_point(om_raw) or {}
-        ow_raw = fetch_openweather(LAT, LON)
         ow_now = pick_openweather_now(ow_raw) if ow_raw else {}
         merged_now = {**om_point, **ow_now}   # ponto AGORA real
 
@@ -582,19 +770,22 @@ def api_explain():
                 avg_altura  = safe_avg([p.get("wave_height_m") for p in same_day_points])
                 avg_periodo = safe_avg([p.get("wave_period_s") for p in same_day_points])
                 avg_vento   = safe_avg([p.get("wind_speed_kmh") for p in same_day_points])
-                avg_dir     = safe_avg([p.get("wind_dir_deg") for p in same_day_points])
+                avg_wind_dir = safe_avg([p.get("wind_dir_deg") for p in same_day_points])
+                avg_wave_dir = safe_avg([p.get("wave_direction_deg") for p in same_day_points])
 
-            selected_point = {
-                "wave_height_m": round(avg_altura, 2) if avg_altura else None,
-                "wave_period_s": round(avg_periodo, 1) if avg_periodo else None,
-                "wave_direction_deg": avg_dir,
-                "wind_speed_kmh": round(avg_vento, 1) if avg_vento else None,
-                "wind_direction_deg": avg_dir,
-        }
+                selected_point = {
+                    "wave_height_m": round(avg_altura, 2) if avg_altura else None,
+                    "wave_period_s": round(avg_periodo, 1) if avg_periodo else None,
+                    "wave_direction_deg": round(avg_wave_dir) if avg_wave_dir else None,
+                    "wind_speed_kmh": round(avg_vento, 1) if avg_vento else None,
+                    "wind_direction_deg": round(avg_wind_dir) if avg_wind_dir else None,
+                }
 
-# AMANHÃ e DEPOIS recebem clima do dia
-        if day_offset != 0 and selected_point:
-            selected_point.update(weather_point)
+# Todos os dias recebem clima do dia quando disponível
+        if selected_point:
+            selected_point.update({k: v for k, v in weather_point.items() if v is not None})
+        elif day_offset != 0:
+            selected_point = dict(weather_point)
 
 # ========= 4. MARÉ =========
         tide_raw = get_tide_adjusted(day_offset) or {}
@@ -632,6 +823,10 @@ def api_explain():
         if direcao is not None:
             fonte_principal["wave_direction_deg"] = direcao
             fonte_principal["wave_dir_deg"] = direcao
+        wind_dir = fonte_principal.get("wind_dir_deg") or fonte_principal.get("wind_direction_deg")
+        if wind_dir is not None:
+            fonte_principal["wind_dir_deg"] = wind_dir
+            fonte_principal["wind_direction_deg"] = wind_dir
 
 # Maré dentro do forecast_now (hoje)
         merged_now["tide"] = {
@@ -655,7 +850,10 @@ def api_explain():
 
         # debug leve
         print("[/api/explain] ok",
-              {"have_om": bool(om_raw), "pts_series": len(forecast_series),
+              {"have_om": bool(om_raw), "have_wind": bool(wind_raw),
+               "have_weather": bool(weather_raw), "have_ow": bool(ow_raw),
+               "pts_series": len(forecast_series),
+               "series_wind_pts": sum(1 for p in forecast_series if p.get("wind_speed_kmh") is not None),
                "have_now": bool(merged_now), "ai": ai_mode})
 
         explanation_pt = ""
@@ -690,5 +888,4 @@ def teste_cache():
     agora = time.time()
     time.sleep(3)  # simula operação lenta
     return {"ts": agora}
-
 
